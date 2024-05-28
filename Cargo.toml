@@ -4,3 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+crossbeam = "0.8.4"
+oneshot = "0.1.7"
+thiserror = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+tracing-subscriber = "*"
+anyhow = "*"
