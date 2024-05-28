@@ -60,15 +60,15 @@ impl ThreadPool {
         let num_of_threads_to_use = if num_threads <= 2 { 1 } else { num_threads - 2 };
         ThreadPool {
             threads: (0..num_of_threads_to_use)
-                .map(|_| {
+                .map(|thread_id| {
                     let receiver: crossbeam::channel::Receiver<Box<dyn FnOnce() + Send>> =
                         receiver.clone();
                     thread::spawn(move || {
-                        trace!("thread is spawned!");
+                        trace!("thread # {thread_id} is spawned!");
                         while let Ok(f) = receiver.recv() {
-                            trace!("thread has received a job!");
+                            trace!("thread # {thread_id} has received a job!");
                             f();
-                            trace!("thread has completed running the job");
+                            trace!("thread # {thread_id} has completed running the job");
                         }
                     })
                 })
@@ -122,7 +122,7 @@ mod tests {
         } else {
             assert!(false);
         }
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(101));
         trace!("second check");
         if let Future::Pending(_) = value {
             assert!(true);
