@@ -4,7 +4,6 @@ use std::{
     sync::RwLock,
     thread::{self, JoinHandle},
 };
-
 use tracing::{error, trace};
 
 pub enum Future<T> {
