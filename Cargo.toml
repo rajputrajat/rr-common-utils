@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 crossbeam = "0.8.4"
+lazy_static = "1.4.0"
 oneshot = "0.1.7"
 thiserror = "1"
 tracing = "0.1"
