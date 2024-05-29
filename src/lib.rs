@@ -6,7 +6,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 use thiserror::Error as ThisError;
-use tracing::{error, trace};
+use tracing::{error, trace, warn};
 
 #[derive(Debug)]
 pub enum Future<T> {
@@ -35,7 +35,7 @@ where
 
     pub fn map<U, F>(self, f: F) -> Future<U>
     where
-        U: Send + 'static,
+        U: Debug + Send + 'static,
         F: FnOnce(T) -> U + Send + 'static,
     {
         match self {
@@ -52,9 +52,9 @@ where
 
     pub fn try_map<U, F, E>(self, f: F) -> Future<Result<U, E>>
     where
-        U: Send + 'static,
+        U: Debug + Send + 'static,
         F: FnOnce(T) -> Result<U, E> + Send + 'static,
-        E: Send + 'static,
+        E: Debug + Send + 'static,
     {
         match self {
             Future::Ready(t) => ThreadPool::run_async(move || f(t)),
@@ -91,7 +91,7 @@ impl ThreadPool {
     pub fn run_async<F, T>(f: F) -> Future<T>
     where
         F: FnOnce() -> T + Send + 'static,
-        T: Send + 'static,
+        T: Debug + Send + 'static,
     {
         let (sender, receiver) = oneshot::channel();
         let future = Future::Pending(receiver);
@@ -99,8 +99,12 @@ impl ThreadPool {
             thread_pool
                 .distributor
                 .send(Box::new(|| {
-                    trace!("this is a job cb being scheduled to run");
-                    sender.send(f()).unwrap();
+                    if sender.is_closed() {
+                        warn!("receiver of {sender:?} is closed, so skipping run of attached callback");
+                    } else {
+                        trace!("this is a job cb being scheduled to run");
+                        sender.send(f()).unwrap();
+                    }
                 }))
                 .unwrap()
         }
@@ -110,8 +114,8 @@ impl ThreadPool {
     pub fn try_run_async<F, T, E>(f: F) -> Future<Result<T, E>>
     where
         F: FnOnce() -> Result<T, E> + Send + 'static,
-        T: Send + 'static,
-        E: Send + 'static,
+        T: Debug + Send + 'static,
+        E: Debug + Send + 'static,
     {
         let (sender, receiver) = oneshot::channel();
         let future = Future::Pending(receiver);
@@ -119,8 +123,12 @@ impl ThreadPool {
             thread_pool
                 .distributor
                 .send(Box::new(|| {
-                    trace!("this is a job cb being scheduled to run");
-                    sender.send(f()).unwrap();
+                    if sender.is_closed() {
+                        warn!("receiver of {sender:?} is closed, so skipping run of attached callback");
+                    } else {
+                        trace!("this is a job cb being scheduled to run");
+                        sender.send(f()).unwrap();
+                    }
                 }))
                 .unwrap()
         }
