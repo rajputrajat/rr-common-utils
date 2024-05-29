@@ -67,6 +67,13 @@ where
             }),
         }
     }
+
+    pub fn finish(self) -> Result<T, oneshot::RecvError> {
+        match self {
+            Future::Ready(t) => Ok(t),
+            Future::Pending(receiver) => receiver.recv(),
+        }
+    }
 }
 
 #[derive(Debug, ThisError)]
