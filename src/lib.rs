@@ -49,6 +49,24 @@ where
             }),
         }
     }
+
+    pub fn try_map<U, F, E>(self, f: F) -> Future<Result<U, E>>
+    where
+        U: Send + 'static,
+        F: FnOnce(T) -> Result<U, E> + Send + 'static,
+        E: Send + 'static,
+    {
+        match self {
+            Future::Ready(t) => ThreadPool::run_async(move || f(t)),
+            Future::Pending(fut) => ThreadPool::run_async(move || match fut.recv() {
+                Ok(t) => f(t),
+                Err(_) => {
+                    error!("execution of mapped future failed");
+                    panic!("mapped future problem")
+                }
+            }),
+        }
+    }
 }
 
 #[derive(Debug, ThisError)]
@@ -67,6 +85,26 @@ impl ThreadPool {
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
+    {
+        let (sender, receiver) = oneshot::channel();
+        let future = Future::Pending(receiver);
+        if let Some(thread_pool) = THREAD_POOL.read().unwrap().as_ref() {
+            thread_pool
+                .distributor
+                .send(Box::new(|| {
+                    trace!("this is a job cb being scheduled to run");
+                    sender.send(f()).unwrap();
+                }))
+                .unwrap()
+        }
+        future
+    }
+
+    pub fn try_run_async<F, T, E>(f: F) -> Future<Result<T, E>>
+    where
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
     {
         let (sender, receiver) = oneshot::channel();
         let future = Future::Pending(receiver);
