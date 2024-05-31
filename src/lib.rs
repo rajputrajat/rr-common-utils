@@ -3,11 +3,12 @@ use std::{
     borrow::Cow,
     fmt::Debug,
     mem,
-    sync::{mpsc, OnceLock},
+    sync::{mpsc, Arc, Mutex, OnceLock},
     thread::{self, JoinHandle},
+    time::Instant,
 };
 use thiserror::Error as ThisError;
-use tracing::{error, trace, warn};
+use tracing::{debug, error, trace, warn};
 
 #[derive(Debug)]
 pub enum Future<T> {
@@ -34,38 +35,44 @@ where
         }
     }
 
-    pub fn map<U, F>(self, f: F) -> Future<U>
+    pub fn map<U, F>(self, f: F, job_desc: JobDesc) -> Future<U>
     where
         U: Debug + Send + 'static,
         F: FnOnce(T) -> U + Send + 'static,
     {
         match self {
-            Future::Ready(t) => ThreadPool::global().run_async(move || f(t)),
-            Future::Pending(fut) => ThreadPool::global().run_async(move || match fut.recv() {
-                Ok(t) => f(t),
-                Err(_) => {
-                    error!("execution of mapped future failed");
-                    panic!("mapped future problem")
-                }
-            }),
+            Future::Ready(t) => ThreadPool::global().run_async(move || f(t), job_desc),
+            Future::Pending(fut) => ThreadPool::global().run_async(
+                move || match fut.recv() {
+                    Ok(t) => f(t),
+                    Err(_) => {
+                        error!("execution of mapped future failed");
+                        panic!("mapped future problem")
+                    }
+                },
+                job_desc,
+            ),
         }
     }
 
-    pub fn try_map<U, F, E>(self, f: F) -> Future<Result<U, E>>
+    pub fn try_map<U, F, E>(self, f: F, job_desc: JobDesc) -> Future<Result<U, E>>
     where
         U: Debug + Send + 'static,
         F: FnOnce(T) -> Result<U, E> + Send + 'static,
         E: Debug + Send + 'static,
     {
         match self {
-            Future::Ready(t) => ThreadPool::global().run_async(move || f(t)),
-            Future::Pending(fut) => ThreadPool::global().run_async(move || match fut.recv() {
-                Ok(t) => f(t),
-                Err(_) => {
-                    error!("execution of mapped future failed");
-                    panic!("mapped future problem")
-                }
-            }),
+            Future::Ready(t) => ThreadPool::global().run_async(move || f(t), job_desc),
+            Future::Pending(fut) => ThreadPool::global().run_async(
+                move || match fut.recv() {
+                    Ok(t) => f(t),
+                    Err(_) => {
+                        error!("execution of mapped future failed");
+                        panic!("mapped future problem")
+                    }
+                },
+                job_desc,
+            ),
         }
     }
 
@@ -86,25 +93,31 @@ where
         let (sender, receiver) = mpsc::channel();
         for fut in self {
             let sender = sender.clone();
-            ThreadPool::global().run_async(move || {
-                match fut {
-                    Future::Ready(t) => {
-                        trace!("data '{t:?}' was ready so send, without waiting");
-                        let _ = sender.send(t);
-                    }
-                    Future::Pending(one_receiver) => {
-                        if let Ok(t) = one_receiver.recv() {
-                            trace!("data '{t:?}' received from future now send");
+            ThreadPool::global().run_async(
+                move || {
+                    match fut {
+                        Future::Ready(t) => {
+                            trace!("data '{t:?}' was ready so send, without waiting");
                             let _ = sender.send(t);
                         }
-                    }
-                };
-            });
+                        Future::Pending(one_receiver) => {
+                            if let Ok(t) = one_receiver.recv() {
+                                trace!("data '{t:?}' received from future now send");
+                                let _ = sender.send(t);
+                            }
+                        }
+                    };
+                },
+                JobDesc::create("SelectFuture", "forward data for select"),
+            );
         }
         let (oneshot_sender, oneshot_receiver) = oneshot::channel();
-        ThreadPool::global().run_async(move || {
-            oneshot_sender.send(receiver.recv().unwrap()).unwrap();
-        });
+        ThreadPool::global().run_async(
+            move || {
+                oneshot_sender.send(receiver.recv().unwrap()).unwrap();
+            },
+            JobDesc::create("SelectFuture", "return the selected"),
+        );
         Future::Pending(oneshot_receiver)
     }
 }
@@ -115,37 +128,70 @@ pub enum Error {
     FutureWasReady,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct JobDesc {
+    owner: Cow<'static, str>,
+    desc: Cow<'static, str>,
+}
+
+impl JobDesc {
+    pub fn create<C: Into<Cow<'static, str>>>(owner: C, desc: C) -> Self {
+        Self {
+            owner: owner.into(),
+            desc: desc.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ThreadStatus {
+    Idle,
+    Busy(Instant, JobDesc),
+}
+
+#[derive(Clone)]
+struct ArcThreadStatus(Arc<Mutex<ThreadStatus>>);
+
+struct ThreadData {
+    name: String,
+    handle: JoinHandle<()>,
+    status: ArcThreadStatus,
+}
+
 pub struct ThreadPool {
-    name: Cow<'static, str>,
-    threads: Vec<JoinHandle<()>>,
-    distributor: crossbeam::channel::Sender<Box<dyn FnOnce() + Send + 'static>>,
+    threads: Vec<ThreadData>,
+    distributor: crossbeam::channel::Sender<Box<dyn FnOnce(ArcThreadStatus) + Send + 'static>>,
 }
 
 impl Debug for ThreadPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!(
-            "ThreadPool {{ name: {}, num: {} }}",
-            self.name,
-            self.threads.len()
-        ))
+        f.write_fmt(format_args!("ThreadPool {{ num: {} }}", self.threads.len()))
     }
 }
 
 impl ThreadPool {
-    #[tracing::instrument(skip(self, f), fields(self.name = %self.name))]
-    pub fn run_async<F, T>(&self, f: F) -> Future<T>
+    #[tracing::instrument(skip(self, f))]
+    pub fn run_async<F, T>(&self, f: F, job_desc: JobDesc) -> Future<T>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Debug + Send + 'static,
     {
         let (sender, receiver) = oneshot::channel();
         self.distributor
-            .send(Box::new(|| {
+            .send(Box::new(|arc_thread_status: ArcThreadStatus| {
                 if sender.is_closed() {
                     warn!("receiver of {sender:?} is closed, so skipping run of attached callback");
                 } else {
                     trace!("this is a job cb being scheduled to run");
-                    sender.send(f()).unwrap();
+                    sender
+                        .send({
+                            *arc_thread_status.0.lock().unwrap() =
+                                ThreadStatus::Busy(Instant::now(), job_desc);
+                            let out = f();
+                            *arc_thread_status.0.lock().unwrap() = ThreadStatus::Idle;
+                            out
+                        })
+                        .unwrap();
                 }
             }))
             .unwrap();
@@ -153,7 +199,8 @@ impl ThreadPool {
         Future::Pending(receiver)
     }
 
-    pub fn try_run_async<F, T, E>(&self, f: F) -> Future<Result<T, E>>
+    #[tracing::instrument(skip(self, f))]
+    pub fn try_run_async<F, T, E>(&self, f: F, job_desc: JobDesc) -> Future<Result<T, E>>
     where
         F: FnOnce() -> Result<T, E> + Send + 'static,
         T: Debug + Send + 'static,
@@ -161,12 +208,20 @@ impl ThreadPool {
     {
         let (sender, receiver) = oneshot::channel();
         self.distributor
-            .send(Box::new(|| {
+            .send(Box::new(|arc_thread_status: ArcThreadStatus| {
                 if sender.is_closed() {
                     warn!("receiver of {sender:?} is closed, so skipping run of attached callback");
                 } else {
                     trace!("this is a job cb being scheduled to run");
-                    sender.send(f()).unwrap();
+                    sender
+                        .send({
+                            *arc_thread_status.0.lock().unwrap() =
+                                ThreadStatus::Busy(Instant::now(), job_desc);
+                            let out = f();
+                            *arc_thread_status.0.lock().unwrap() = ThreadStatus::Idle;
+                            out
+                        })
+                        .unwrap();
                 }
             }))
             .unwrap();
@@ -175,22 +230,30 @@ impl ThreadPool {
     }
 
     #[tracing::instrument]
-    pub fn create<N: Into<Cow<'static, str>> + Debug>(name: N, num_of_threads: usize) -> Self {
+    fn create(num_of_threads: usize) -> Self {
         let (distributor, receiver) = crossbeam::channel::unbounded();
         ThreadPool {
-            name: name.into(),
             threads: (0..num_of_threads)
                 .map(|thread_id| {
-                    let receiver: crossbeam::channel::Receiver<Box<dyn FnOnce() + Send>> =
-                        receiver.clone();
-                    thread::spawn(move || {
+                    let receiver: crossbeam::channel::Receiver<
+                        Box<dyn FnOnce(ArcThreadStatus) + Send>,
+                    > = receiver.clone();
+                    let status = ArcThreadStatus(Arc::new(Mutex::new(ThreadStatus::Idle)));
+                    let status_ = status.clone();
+                    let handle = thread::spawn(move || {
                         trace!("thread # {thread_id} is spawned!");
                         while let Ok(f) = receiver.recv() {
+                            let status = status_.clone();
                             trace!("thread # {thread_id} has received a job!");
-                            f();
+                            f(status);
                             trace!("thread # {thread_id} has completed running the job");
                         }
-                    })
+                    });
+                    ThreadData {
+                        name: format!("Thread # {thread_id}"),
+                        handle,
+                        status,
+                    }
                 })
                 .collect(),
             distributor,
@@ -198,7 +261,44 @@ impl ThreadPool {
     }
 
     pub fn global() -> &'static Self {
-        GLOBAL_THREAD_POOL.get_or_init(|| ThreadPool::create("Global", 128))
+        GLOBAL_THREAD_POOL.get_or_init(|| ThreadPool::create(128))
+    }
+
+    pub fn debug_print_brief_status(&self) {
+        let free = self.threads.iter().fold(0, |acc, th| {
+            if *th.status.0.lock().unwrap() == ThreadStatus::Idle {
+                acc + 1
+            } else {
+                acc
+            }
+        });
+        debug!(
+            "{} / {} threads of the ThreadPool are available",
+            free,
+            self.threads.len()
+        );
+    }
+
+    pub fn debug_print_detailed_status(&self) {
+        let mut to_log = String::new();
+        let mut busy_cnt = 0;
+        for th in &self.threads {
+            let th_status = { (*th.status.0.lock().unwrap()).clone() };
+            if let ThreadStatus::Busy(instant, job_desc) = th_status {
+                busy_cnt += 1;
+                to_log.push_str(&format!(
+                    "{}, {:?}, is busy since {:?}",
+                    &th.name,
+                    job_desc,
+                    Instant::now().duration_since(instant)
+                ));
+                to_log.push('\n');
+            }
+        }
+        debug!(
+            "{busy_cnt} / {} threads are busy. Here is the list of busy threads:\n{to_log}",
+            self.threads.len()
+        );
     }
 }
 
@@ -209,7 +309,7 @@ impl Drop for ThreadPool {
         let mut threads = vec![];
         mem::swap(&mut self.threads, &mut threads);
         for th in threads {
-            th.join().unwrap();
+            th.handle.join().unwrap();
         }
     }
 }
@@ -234,7 +334,10 @@ mod tests {
             42
         };
         trace!("pushing a function to run asynchronously");
-        let mut value = ThreadPool::global().run_async(magic_number);
+        let mut value = ThreadPool::global().run_async(
+            magic_number,
+            JobDesc::create("simple_test", "returns the magic number"),
+        );
         if let Future::Pending(_) = value {
             trace!("before sleep and poll the value should be pending and it is");
         } else {
@@ -255,25 +358,35 @@ mod tests {
     #[test]
     fn nested_future() -> AnyResult<()> {
         let _ = tracing_subscriber::fmt::try_init();
-        let magic_num_fut = ThreadPool::global().run_async(|| {
-            thread::sleep(Duration::from_millis(100));
-            42
-        });
+        ThreadPool::global().debug_print_detailed_status();
+        let magic_num_fut = ThreadPool::global().run_async(
+            || {
+                thread::sleep(Duration::from_millis(100));
+                42
+            },
+            JobDesc::create("nested_future", "sleep then return the magic number"),
+        );
+        ThreadPool::global().debug_print_detailed_status();
         if let Future::Pending(_) = magic_num_fut {
             trace!("before polling the first future should be a pending");
         } else {
             unreachable!("before polling shouldn't be 'ready'");
         }
-        let mut double_num_fut = magic_num_fut.map(|n| {
-            thread::sleep(Duration::from_millis(100));
-            n * 2
-        });
+        let mut double_num_fut = magic_num_fut.map(
+            |n| {
+                thread::sleep(Duration::from_millis(100));
+                n * 2
+            },
+            JobDesc::create("double_num_fut_map", "sleep. then return the double number"),
+        );
+        ThreadPool::global().debug_print_detailed_status();
         if let Future::Pending(_) = double_num_fut {
             trace!("before polling the nested future should be pending");
         } else {
             unreachable!("before polling the nested future shouldn't be 'ready'");
         }
         double_num_fut.poll();
+        ThreadPool::global().debug_print_detailed_status();
         if let Future::Pending(_) = double_num_fut {
             trace!( "first polling is done, but both the future are going to resolve in 100 msec each, so pending it is");
         } else {
@@ -281,6 +394,7 @@ mod tests {
         }
         thread::sleep(Duration::from_millis(105));
         double_num_fut.poll();
+        ThreadPool::global().debug_print_detailed_status();
         if let Future::Pending(_) = double_num_fut {
             trace!( "second polling is done, but only the future is going to resolve in 100 msec, so pending it is");
         } else {
@@ -289,6 +403,7 @@ mod tests {
         thread::sleep(Duration::from_millis(105));
         double_num_fut.poll();
         assert_eq!(double_num_fut, Future::Ready(84));
+        ThreadPool::global().debug_print_detailed_status();
         Ok(())
     }
 }
