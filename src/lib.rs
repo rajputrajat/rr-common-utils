@@ -121,6 +121,16 @@ pub struct ThreadPool {
     distributor: crossbeam::channel::Sender<Box<dyn FnOnce() + Send + 'static>>,
 }
 
+impl Debug for ThreadPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!(
+            "ThreadPool {{ name: {}, num: {} }}",
+            self.name,
+            self.threads.len()
+        ))
+    }
+}
+
 impl ThreadPool {
     #[tracing::instrument(skip(self, f), fields(self.name = %self.name))]
     pub fn run_async<F, T>(&self, f: F) -> Future<T>
