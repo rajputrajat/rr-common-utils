@@ -343,7 +343,7 @@ mod tests {
         } else {
             unreachable!("before sleep and poll the future must be pending");
         }
-        thread::sleep(Duration::from_millis(101));
+        thread::sleep(Duration::from_millis(103));
         if let Future::Pending(_) = value {
             trace!("after sleep but before polling, the future should be pending. and it is");
         } else {
