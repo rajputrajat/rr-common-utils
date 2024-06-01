@@ -78,8 +78,8 @@ where
 
     pub fn finish(self) -> Result<T, oneshot::RecvError> {
         match self {
-            Future::Ready(t) => Ok(t),
-            Future::Pending(receiver) => receiver.recv(),
+            Self::Ready(t) => Ok(t),
+            Self::Pending(receiver) => receiver.recv(),
         }
     }
 }
@@ -89,7 +89,10 @@ where
     T: Send + 'static + Debug,
 {
     #[tracing::instrument(skip_all)]
-    fn select(self) -> Future<T> {
+    fn select<F>(self, f: F) -> Future<T>
+    where
+        F: Fn(&T) -> bool + Send + 'static,
+    {
         let (sender, receiver) = mpsc::channel();
         for fut in self {
             let sender = sender.clone();
@@ -114,7 +117,14 @@ where
         let (oneshot_sender, oneshot_receiver) = oneshot::channel();
         ThreadPool::global().run_async(
             move || {
-                oneshot_sender.send(receiver.recv().unwrap()).unwrap();
+                let data = loop {
+                    if let Ok(data) = receiver.recv() {
+                        if f(&data) {
+                            break data;
+                        }
+                    }
+                };
+                oneshot_sender.send(data).unwrap();
             },
             JobDesc::create("SelectFuture", "return the selected"),
         );
