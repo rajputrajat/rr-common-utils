@@ -84,28 +84,26 @@ where
     }
 }
 
-pub trait SelectFuture<T, I>: Sized
+pub trait SelectFuture<T>: Sized
 where
     T: Send + 'static + Debug,
 {
-    fn select<F>(iter: I, f: F) -> Future<T>
+    fn select<F>(self, f: F) -> Future<T>
     where
-        I: Iterator<Item = T>,
         F: Fn(&T) -> bool + Send + 'static;
 }
 
-impl<T, I> SelectFuture<T, I> for Vec<Future<T>>
+impl<T> SelectFuture<T> for Vec<Future<T>>
 where
     T: Send + 'static + Debug,
-    I: Iterator<Item = Future<T>>,
 {
     #[tracing::instrument(skip_all)]
-    fn select<F>(iter: I, f: F) -> Future<T>
+    fn select<F>(self, f: F) -> Future<T>
     where
         F: Fn(&T) -> bool + Send + 'static,
     {
         let (sender, receiver) = mpsc::channel();
-        for fut in iter {
+        for fut in self {
             let sender = sender.clone();
             ThreadPool::global().run_async(
                 move || {
