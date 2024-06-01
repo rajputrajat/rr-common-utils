@@ -94,21 +94,11 @@ where
         F: Fn(&T) -> bool + Send + 'static;
 }
 
-impl<T, I, Vl> SelectFuture<T, I> for Vl
+impl<T, I> SelectFuture<T, I> for Vec<Future<T>>
 where
     T: Send + 'static + Debug,
     I: Iterator<Item = Future<T>>,
-    Vl: Iterator<Item = Future<T>>,
 {
-    // pub struct SelectF<I> {
-    //     pub iter: I,
-    // }
-
-    // impl<T, I> SelectFuture<T, I> for SelectF<I>
-    // where
-    //     T: Debug + Send + 'static,
-    //     I: Iterator<Item = Future<T>>,
-    // {
     #[tracing::instrument(skip_all)]
     fn select<F>(iter: I, f: F) -> Future<T>
     where
