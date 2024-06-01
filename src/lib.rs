@@ -1,4 +1,3 @@
-use core::panic;
 use std::{
     borrow::Cow,
     fmt::Debug,
@@ -35,40 +34,21 @@ where
         }
     }
 
-    pub fn map<U, F>(self, f: F, job_desc: JobDesc) -> Future<U>
-    where
-        U: Debug + Send + 'static,
-        F: FnOnce(T) -> U + Send + 'static,
-    {
-        match self {
-            Future::Ready(t) => ThreadPool::global().run_async(move || f(t), job_desc),
-            Future::Pending(fut) => ThreadPool::global().run_async(
-                move || match fut.recv() {
-                    Ok(t) => f(t),
-                    Err(_) => {
-                        error!("execution of mapped future failed");
-                        panic!("mapped future problem")
-                    }
-                },
-                job_desc,
-            ),
-        }
-    }
-
     pub fn try_map<U, F, E>(self, f: F, job_desc: JobDesc) -> Future<Result<U, E>>
     where
         U: Debug + Send + 'static,
         F: FnOnce(T) -> Result<U, E> + Send + 'static,
-        E: Debug + Send + 'static,
+        E: Debug + Send + 'static + From<oneshot::RecvError>,
     {
+        let job_desc_ = job_desc.clone();
         match self {
             Future::Ready(t) => ThreadPool::global().run_async(move || f(t), job_desc),
             Future::Pending(fut) => ThreadPool::global().run_async(
                 move || match fut.recv() {
                     Ok(t) => f(t),
-                    Err(_) => {
-                        error!("execution of mapped future failed");
-                        panic!("mapped future problem")
+                    Err(e) => {
+                        warn!("{:?}: {e:?}, execution of mapped future failed", job_desc_);
+                        Err(e.into())
                     }
                 },
                 job_desc,
@@ -282,7 +262,7 @@ impl ThreadPool {
                             trace!("thread # {thread_id} has completed running the job");
                         }
                     });
-                    (*thread_data.0.lock().unwrap()).handle.insert(handle);
+                    let _ = (thread_data.0.lock().unwrap()).handle.insert(handle);
                     thread_data
                 })
                 .collect(),
