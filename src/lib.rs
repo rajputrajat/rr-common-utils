@@ -193,7 +193,7 @@ impl ThreadPool {
                             out
                         })
                         {
-                            error!("{thread_name}: {job_desc_:?}, {e:?}");
+                            warn!("{thread_name}: {job_desc_:?}, {e:?}");
                         }
                 }
             }))
@@ -228,7 +228,7 @@ impl ThreadPool {
                             out
                         })
                         {
-                            error!("{thread_name}: {job_desc_:?}, {e:?}");
+                            warn!("{thread_name}: {job_desc_:?}, {e:?}");
                         }
                 }
             }))
