@@ -169,17 +169,17 @@ enum ThreadStatus {
 }
 
 #[derive(Clone)]
-struct ArcThreadStatus(Arc<Mutex<ThreadStatus>>);
+struct ArcThreadData(Arc<Mutex<ThreadData>>);
 
 struct ThreadData {
     name: String,
-    handle: JoinHandle<()>,
-    status: ArcThreadStatus,
+    handle: Option<JoinHandle<()>>,
+    status: ThreadStatus,
 }
 
 pub struct ThreadPool {
-    threads: Vec<ThreadData>,
-    distributor: crossbeam::channel::Sender<Box<dyn FnOnce(ArcThreadStatus) + Send + 'static>>,
+    threads: Vec<ArcThreadData>,
+    distributor: crossbeam::channel::Sender<Box<dyn FnOnce(ArcThreadData) + Send + 'static>>,
 }
 
 impl Debug for ThreadPool {
@@ -196,25 +196,30 @@ impl ThreadPool {
         T: Debug + Send + 'static,
     {
         let (sender, receiver) = oneshot::channel();
-        self.distributor
-            .send(Box::new(|arc_thread_status: ArcThreadStatus| {
+        let job_desc_ = job_desc.clone();
+        if let Err(e) = self.distributor
+            .send(Box::new(move |thread_data: ArcThreadData| {
+                let thread_name = (*thread_data.0.lock().unwrap()).name.clone();
                 if sender.is_closed() {
-                    warn!("receiver of {sender:?} is closed, so skipping run of attached callback");
+                    warn!("{thread_name}: receiver of {sender:?} is closed, so skipping run of attached callback");
                 } else {
-                    trace!("this is a job cb being scheduled to run");
-                    sender
+                    trace!("{thread_name}: this is a job cb being scheduled to run");
+                    if let Err(e) = sender
                         .send({
-                            *arc_thread_status.0.lock().unwrap() =
-                                ThreadStatus::Busy(Instant::now(), job_desc);
+                            (*thread_data.0.lock().unwrap()).status =
+                                ThreadStatus::Busy(Instant::now(), job_desc_.clone());
                             let out = f();
-                            *arc_thread_status.0.lock().unwrap() = ThreadStatus::Idle;
+                            (*thread_data.0.lock().unwrap()).status = ThreadStatus::Idle;
                             out
                         })
-                        .unwrap();
+                        {
+                            error!("{thread_name}: {job_desc_:?}, {e:?}");
+                        }
                 }
             }))
-            .unwrap();
-
+        {
+            error!("{job_desc:?}, {e:?}");
+        }
         Future::Pending(receiver)
     }
 
@@ -226,25 +231,30 @@ impl ThreadPool {
         E: Debug + Send + 'static,
     {
         let (sender, receiver) = oneshot::channel();
-        self.distributor
-            .send(Box::new(|arc_thread_status: ArcThreadStatus| {
+        let job_desc_ = job_desc.clone();
+        if let Err(e) = self.distributor
+            .send(Box::new(move |thread_data: ArcThreadData| {
+                let thread_name = (*thread_data.0.lock().unwrap()).name.clone();
                 if sender.is_closed() {
-                    warn!("receiver of {sender:?} is closed, so skipping run of attached callback");
+                    warn!("{thread_name}: receiver of {sender:?} is closed, so skipping run of attached callback");
                 } else {
-                    trace!("this is a job cb being scheduled to run");
-                    sender
+                    trace!("{thread_name}: this is a job cb being scheduled to run");
+                    if let Err(e) = sender
                         .send({
-                            *arc_thread_status.0.lock().unwrap() =
-                                ThreadStatus::Busy(Instant::now(), job_desc);
+                            (*thread_data.0.lock().unwrap()).status =
+                                ThreadStatus::Busy(Instant::now(), job_desc_.clone());
                             let out = f();
-                            *arc_thread_status.0.lock().unwrap() = ThreadStatus::Idle;
+                            (*thread_data.0.lock().unwrap()).status = ThreadStatus::Idle;
                             out
                         })
-                        .unwrap();
+                        {
+                            error!("{thread_name}: {job_desc_:?}, {e:?}");
+                        }
                 }
             }))
-            .unwrap();
-
+        {
+            error!("{job_desc:?}, {e:?}");
+        }
         Future::Pending(receiver)
     }
 
@@ -255,24 +265,25 @@ impl ThreadPool {
             threads: (0..num_of_threads)
                 .map(|thread_id| {
                     let receiver: crossbeam::channel::Receiver<
-                        Box<dyn FnOnce(ArcThreadStatus) + Send>,
+                        Box<dyn FnOnce(ArcThreadData) + Send>,
                     > = receiver.clone();
-                    let status = ArcThreadStatus(Arc::new(Mutex::new(ThreadStatus::Idle)));
-                    let status_ = status.clone();
+                    let thread_data = ArcThreadData(Arc::new(Mutex::new(ThreadData {
+                        name: format!("Thread # {thread_id}"),
+                        status: ThreadStatus::Idle,
+                        handle: None,
+                    })));
+                    let thread_data_ = thread_data.clone();
                     let handle = thread::spawn(move || {
                         trace!("thread # {thread_id} is spawned!");
                         while let Ok(f) = receiver.recv() {
-                            let status = status_.clone();
+                            let thread_data = thread_data_.clone();
                             trace!("thread # {thread_id} has received a job!");
-                            f(status);
+                            f(thread_data);
                             trace!("thread # {thread_id} has completed running the job");
                         }
                     });
-                    ThreadData {
-                        name: format!("Thread # {thread_id}"),
-                        handle,
-                        status,
-                    }
+                    (*thread_data.0.lock().unwrap()).handle.insert(handle);
+                    thread_data
                 })
                 .collect(),
             distributor,
@@ -285,7 +296,7 @@ impl ThreadPool {
 
     pub fn debug_print_brief_status(&self) {
         let free = self.threads.iter().fold(0, |acc, th| {
-            if *th.status.0.lock().unwrap() == ThreadStatus::Idle {
+            if (*th.0.lock().unwrap()).status == ThreadStatus::Idle {
                 acc + 1
             } else {
                 acc
@@ -302,12 +313,13 @@ impl ThreadPool {
         let mut to_log = String::new();
         let mut busy_cnt = 0;
         for th in &self.threads {
-            let th_status = { (*th.status.0.lock().unwrap()).clone() };
+            let th_status = (*th.0.lock().unwrap()).status.clone();
+            let name = (*th.0.lock().unwrap()).name.clone();
             if let ThreadStatus::Busy(instant, job_desc) = th_status {
                 busy_cnt += 1;
                 to_log.push_str(&format!(
                     "{}, {:?}, is busy since {:?}",
-                    &th.name,
+                    &name,
                     job_desc,
                     Instant::now().duration_since(instant)
                 ));
@@ -324,11 +336,14 @@ impl ThreadPool {
 static GLOBAL_THREAD_POOL: OnceLock<ThreadPool> = OnceLock::new();
 
 impl Drop for ThreadPool {
+    #[allow(clippy::unwrap_used)]
     fn drop(&mut self) {
         let mut threads = vec![];
         mem::swap(&mut self.threads, &mut threads);
         for th in threads {
-            th.handle.join().unwrap();
+            let th = Arc::into_inner(th.0).unwrap();
+            let th = th.into_inner().unwrap();
+            th.handle.unwrap().join().unwrap();
         }
     }
 }
