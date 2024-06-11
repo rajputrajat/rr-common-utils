@@ -93,12 +93,16 @@ where
                     match fut {
                         Future::Ready(t) => {
                             trace!("data '{t:?}' was ready so send, without waiting");
-                            let _ = sender.send(t);
+                            if let Err(e) = sender.send(t) {
+                                warn!("in select() ready send failed {e:?}");
+                            }
                         }
                         Future::Pending(one_receiver) => {
                             if let Ok(t) = one_receiver.recv() {
                                 trace!("data '{t:?}' received from future now send");
-                                let _ = sender.send(t);
+                                if let Err(e) = sender.send(t) {
+                                    warn!("in select() pending send failed {e:?}");
+                                }
                             }
                         }
                     };
@@ -116,6 +120,7 @@ where
                         }
                     }
                 };
+                trace!("'{data:?}' is selected by select(), and being forwarded to the future");
                 oneshot_sender.send(data).unwrap();
             },
             JobDesc::create("SelectFuture", "return the selected"),
