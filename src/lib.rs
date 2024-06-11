@@ -19,6 +19,7 @@ impl<T> Future<T>
 where
     T: Debug + Send + 'static,
 {
+    #[tracing::instrument(skip(self))]
     pub fn poll(&mut self) {
         if let Future::Pending(receiver) = self {
             match receiver.try_recv() {
@@ -34,6 +35,7 @@ where
         }
     }
 
+    #[tracing::instrument(skip(f, self))]
     pub fn try_map<U, F, E>(self, f: F, job_desc: JobDesc) -> Future<Result<U, E>>
     where
         U: Debug + Send + 'static,
@@ -56,6 +58,7 @@ where
         }
     }
 
+    #[tracing::instrument(skip(self))]
     pub fn finish(self) -> Result<T, oneshot::RecvError> {
         match self {
             Self::Ready(t) => Ok(t),
