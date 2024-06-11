@@ -71,7 +71,7 @@ pub trait SelectFuture<T>: Sized
 where
     T: Send + 'static + Debug,
 {
-    fn select<F>(self, f: F, job_desc: JobDesc) -> Future<T>
+    fn select<F>(self, f: F, job_desc: JobDesc) -> Future<Option<T>>
     where
         F: Fn(&T) -> bool + Send + 'static;
 }
@@ -81,7 +81,7 @@ where
     T: Send + 'static + Debug,
 {
     #[tracing::instrument(skip_all)]
-    fn select<F>(self, f: F, job_desc: JobDesc) -> Future<T>
+    fn select<F>(self, f: F, job_desc: JobDesc) -> Future<Option<T>>
     where
         F: Fn(&T) -> bool + Send + 'static,
     {
@@ -121,8 +121,10 @@ where
                 let data = loop {
                     if let Ok(data) = receiver.recv() {
                         if f(&data) {
-                            break data;
+                            break Some(data);
                         }
+                    } else {
+                        break None;
                     }
                 };
                 trace!("'{data:?}' is selected by select(), {job_desc_:?}, and being forwarded to the future");
