@@ -183,7 +183,7 @@ impl ThreadPool {
                 if sender.is_closed() {
                     warn!("{thread_name}: receiver of {sender:?} is closed, so skipping run of attached callback");
                 } else {
-                    trace!("{thread_name}: this is a job cb being scheduled to run");
+                    trace!("{thread_name}: this is a job cb '{job_desc_:?}' being scheduled to run");
                     if let Err(e) = sender
                         .send({
                             (*thread_data.0.lock().unwrap()).status =
@@ -216,7 +216,7 @@ impl ThreadPool {
             .send(Box::new(move |thread_data: ArcThreadData| {
                 let thread_name = (*thread_data.0.lock().unwrap()).name.clone();
                 if sender.is_closed() {
-                    warn!("{thread_name}: receiver of {sender:?} is closed, so skipping run of attached callback");
+                    warn!("{thread_name}: receiver of {sender:?} is closed, so skipping run of attached job '{job_desc_:?}'");
                 } else {
                     trace!("{thread_name}: this is a job cb being scheduled to run");
                     if let Err(e) = sender
