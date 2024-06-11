@@ -71,7 +71,7 @@ pub trait SelectFuture<T>: Sized
 where
     T: Send + 'static + Debug,
 {
-    fn select<F>(self, f: F) -> Future<T>
+    fn select<F>(self, f: F, job_desc: JobDesc) -> Future<T>
     where
         F: Fn(&T) -> bool + Send + 'static;
 }
@@ -81,10 +81,14 @@ where
     T: Send + 'static + Debug,
 {
     #[tracing::instrument(skip_all)]
-    fn select<F>(self, f: F) -> Future<T>
+    fn select<F>(self, f: F, job_desc: JobDesc) -> Future<T>
     where
         F: Fn(&T) -> bool + Send + 'static,
     {
+        trace!(
+            "scheduling select() for {} futures, {job_desc:?}",
+            self.len()
+        );
         let (sender, receiver) = mpsc::channel();
         for fut in self {
             let sender = sender.clone();
@@ -107,10 +111,11 @@ where
                         }
                     };
                 },
-                JobDesc::create("SelectFuture", "forward data for select"),
+                job_desc.clone(),
             );
         }
         let (oneshot_sender, oneshot_receiver) = oneshot::channel();
+        let job_desc_ = job_desc.clone();
         ThreadPool::global().run_async(
             move || {
                 let data = loop {
@@ -120,10 +125,10 @@ where
                         }
                     }
                 };
-                trace!("'{data:?}' is selected by select(), and being forwarded to the future");
+                trace!("'{data:?}' is selected by select(), {job_desc_:?}, and being forwarded to the future");
                 oneshot_sender.send(data).unwrap();
             },
-            JobDesc::create("SelectFuture", "return the selected"),
+            JobDesc::create("SelectFuture".to_owned(), format!("return the selected, parent job: {job_desc:?}")),
         );
         Future::Pending(oneshot_receiver)
     }
