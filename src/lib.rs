@@ -190,24 +190,19 @@ impl ThreadPool {
     {
         let (sender, receiver) = oneshot::channel();
         let job_desc_ = job_desc.clone();
-        if let Err(e) = self.distributor
+        if let Err(e) = self
+            .distributor
             .send(Box::new(move |thread_data: ArcThreadData| {
                 let thread_name = (*thread_data.0.lock().unwrap()).name.clone();
-                if sender.is_closed() {
-                    warn!("{thread_name}: receiver of {sender:?} is closed, so skipping run of '{job_desc_:?}'");
-                } else {
-                    trace!("{thread_name}: this is a job cb '{job_desc_:?}' being scheduled to run");
-                    if let Err(e) = sender
-                        .send({
-                            (*thread_data.0.lock().unwrap()).status =
-                                ThreadStatus::Busy(Instant::now(), job_desc_.clone());
-                            let out = f();
-                            (*thread_data.0.lock().unwrap()).status = ThreadStatus::Idle;
-                            out
-                        })
-                        {
-                            warn!("{thread_name}: {job_desc_:?}, {e:?}");
-                        }
+                trace!("{thread_name}: this is a job cb '{job_desc_:?}' being scheduled to run");
+                if let Err(e) = sender.send({
+                    (*thread_data.0.lock().unwrap()).status =
+                        ThreadStatus::Busy(Instant::now(), job_desc_.clone());
+                    let out = f();
+                    (*thread_data.0.lock().unwrap()).status = ThreadStatus::Idle;
+                    out
+                }) {
+                    warn!("{thread_name}: {job_desc_:?}, {e:?}");
                 }
             }))
         {
@@ -225,24 +220,19 @@ impl ThreadPool {
     {
         let (sender, receiver) = oneshot::channel();
         let job_desc_ = job_desc.clone();
-        if let Err(e) = self.distributor
+        if let Err(e) = self
+            .distributor
             .send(Box::new(move |thread_data: ArcThreadData| {
                 let thread_name = (*thread_data.0.lock().unwrap()).name.clone();
-                if sender.is_closed() {
-                    warn!("{thread_name}: receiver of {sender:?} is closed, so skipping run of attached job '{job_desc_:?}'");
-                } else {
-                    trace!("{thread_name}: this is a job cb being scheduled to run");
-                    if let Err(e) = sender
-                        .send({
-                            (*thread_data.0.lock().unwrap()).status =
-                                ThreadStatus::Busy(Instant::now(), job_desc_.clone());
-                            let out = f();
-                            (*thread_data.0.lock().unwrap()).status = ThreadStatus::Idle;
-                            out
-                        })
-                        {
-                            warn!("{thread_name}: {job_desc_:?}, {e:?}");
-                        }
+                trace!("{thread_name}: this is a job cb being scheduled to run");
+                if let Err(e) = sender.send({
+                    (*thread_data.0.lock().unwrap()).status =
+                        ThreadStatus::Busy(Instant::now(), job_desc_.clone());
+                    let out = f();
+                    (*thread_data.0.lock().unwrap()).status = ThreadStatus::Idle;
+                    out
+                }) {
+                    warn!("{thread_name}: {job_desc_:?}, {e:?}");
                 }
             }))
         {
