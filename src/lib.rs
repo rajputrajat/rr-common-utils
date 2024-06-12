@@ -1,3 +1,4 @@
+use core::panic;
 use std::{
     borrow::Cow,
     fmt::Debug,
@@ -21,17 +22,39 @@ where
 {
     #[tracing::instrument(skip(self))]
     pub fn poll(&mut self) {
-        if let Future::Pending(receiver) = self {
+        if let Self::Pending(receiver) = self {
             match receiver.try_recv() {
                 Ok(t) => {
                     trace!("data: {t:?} in the future is now available");
-                    *self = Future::Ready(t);
+                    *self = Self::Ready(t);
                 }
                 Err(oneshot::TryRecvError::Empty) => {}
                 Err(oneshot::TryRecvError::Disconnected) => {
-                    error!("the sender thread seems to have crashed.")
+                    error!("the sender thread seems to have crashed.");
                 }
             }
+        }
+    }
+
+    #[tracing::instrument(skip(f, self))]
+    pub fn map<U, F>(self, f: F, job_desc: JobDesc) -> Future<U>
+    where
+        U: Debug + Send + 'static,
+        F: FnOnce(T) -> U + Send + 'static,
+    {
+        let job_desc_ = job_desc.clone();
+        match self {
+            Self::Ready(t) => ThreadPool::global().run_async(move || f(t), job_desc),
+            Self::Pending(fut) => ThreadPool::global().run_async(
+                move || match fut.recv() {
+                    Ok(t) => f(t),
+                    Err(e) => {
+                        warn!("execution of mapped future failed: {:?}, {e:?}", job_desc_);
+                        panic!("{job_desc_:?}");
+                    }
+                },
+                job_desc,
+            ),
         }
     }
 
